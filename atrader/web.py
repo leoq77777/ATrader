@@ -1,13 +1,14 @@
 """
 ATrader Interactive Single-Page Web Dashboard & REST Server
 ===========================================================
-Trader-centric interface modeled after modern trading terminals (TradingView,
-Robinhood, Binance, Longbridge). Provides instant visibility into:
+Trader-centric interface modeled after modern trading terminals (Robinhood,
+Binance, TradingView, Longbridge). Provides instant visibility into:
   1. Overall Portfolio Equity & PnL (Hero Bar & Asset Allocation Bar)
   2. Active Strategy & Agent Brain (Strategy logic, parameters, recent trade rationale)
   3. Live Open Positions (Holdings, cost basis, market value, unrealized PnL, target weight)
   4. Asset Watchlist & Live Dynamics (Prices, recent change %, range, agent sentiment)
-  5. Dual-Agent Arena (Head-to-head comparison between ATrader and Agent B)
+  5. Performance & Walk-Forward Equity Curve
+  6. Karpathy Ratchet Mutation Timeline & Multi-Broker Custody Map
 """
 
 import json
@@ -26,7 +27,6 @@ from atrader.ratchet import (
     SIGNAL_REGIME_FILE,
 )
 from atrader.brokers import MultiBrokerRouter
-from atrader.arena import run_agent_comparison
 
 
 def collect_dashboard_state() -> Dict[str, Any]:
@@ -113,18 +113,12 @@ def collect_dashboard_state() -> Dict[str, Any]:
     active_strat = {
         "name": evaluation.get("strategy_name", "baseline"),
         "generation": history.get("current_generation", 0),
-        "description": evaluation.get("strategy_description", "Adaptive EMA Trend + RSI Filter + ATR Trailing Stop"),
+        "description": evaluation.get("strategy_description", "自适应双周期 EMA 顺势跟踪 + RSI 超卖抄底 + 动态 ATR 移动止损"),
         "params": evaluation.get("strategy_params", {}),
         "ratchet_score": evaluation.get("ratchet_score", 0.0),
         "total_llm_cost_usd": history.get("total_llm_cost_usd", 0.0),
         "model_roi": evaluation.get("profit_to_model_cost_ratio", "∞"),
     }
-
-    # Run quick Arena benchmark for the comparison tab
-    try:
-        arena_res = run_agent_comparison()
-    except Exception:
-        arena_res = None
 
     return {
         "config": {
@@ -142,7 +136,6 @@ def collect_dashboard_state() -> Dict[str, Any]:
         "active_strategy": active_strat,
         "evaluation": evaluation,
         "ratchet_history": history,
-        "arena": arena_res,
         "strategy_code": strategy_code,
     }
 
@@ -161,18 +154,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     --bg-base: #070a0f;
     --bg-surface: #0e141f;
     --bg-card: rgba(16, 23, 36, 0.78);
-    --bg-card-hover: rgba(22, 33, 52, 0.92);
     --border: rgba(255, 255, 255, 0.08);
-    --border-accent: rgba(56, 189, 248, 0.35);
     --text-primary: #f8fafc;
     --text-secondary: #94a3b8;
     --text-muted: #64748b;
     --cyan: #38bdf8;
     --cyan-glow: rgba(56, 189, 248, 0.25);
     --emerald: #10b981;
-    --emerald-glow: rgba(16, 185, 129, 0.22);
     --rose: #f43f5e;
-    --rose-glow: rgba(244, 63, 94, 0.22);
     --amber: #f59e0b;
     --purple: #a855f7;
     --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -193,26 +182,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     -webkit-font-smoothing: antialiased;
   }
 
-  /* Header Navbar */
+  /* Header */
   header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 16px;
-    padding: 14px 20px;
-    background: var(--bg-card);
-    backdrop-filter: blur(16px);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    margin-bottom: 20px;
+    display: flex; justify-content: space-between; align-items: center; gap: 16px;
+    padding: 14px 20px; background: var(--bg-card); backdrop-filter: blur(16px);
+    border: 1px solid var(--border); border-radius: 12px; margin-bottom: 20px;
   }
   .brand { display: flex; align-items: center; gap: 12px; }
   .logo {
     width: 34px; height: 34px; border-radius: 9px;
     background: linear-gradient(135deg, #0284c7, #38bdf8);
     display: flex; align-items: center; justify-content: center;
-    font-weight: 800; font-size: 18px; color: #fff;
-    box-shadow: 0 0 16px var(--cyan-glow);
+    font-weight: 800; font-size: 18px; color: #fff; box-shadow: 0 0 16px var(--cyan-glow);
   }
   .brand-name { font-size: 17px; font-weight: 800; letter-spacing: -0.3px; display: flex; align-items: center; gap: 8px; }
   .brand-tag { font-size: 11px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
@@ -235,25 +216,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .btn.success { background: linear-gradient(135deg, #059669, #10b981); border-color: #34d399; color: #fff; box-shadow: 0 0 14px rgba(16, 185, 129, 0.3); }
   .btn.loading { opacity: 0.65; pointer-events: none; }
 
-  /* Section 1: Hero Portfolio Overview (Robinhood / Binance style) */
+  /* Hero Portfolio Overview */
   .hero-portfolio {
-    background: var(--bg-card);
-    backdrop-filter: blur(14px);
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    padding: 22px 24px;
-    margin-bottom: 20px;
-    display: grid;
-    grid-template-columns: 1.4fr 2.6fr;
-    gap: 24px;
-    align-items: center;
+    background: var(--bg-card); backdrop-filter: blur(14px);
+    border: 1px solid var(--border); border-radius: 14px;
+    padding: 22px 24px; margin-bottom: 20px;
+    display: grid; grid-template-columns: 1.4fr 2.6fr; gap: 24px; align-items: center;
   }
   @media (max-width: 960px) { .hero-portfolio { grid-template-columns: 1fr; } }
 
-  .equity-hero-left {
-    border-right: 1px solid var(--border);
-    padding-right: 20px;
-  }
+  .equity-hero-left { border-right: 1px solid var(--border); padding-right: 20px; }
   @media (max-width: 960px) { .equity-hero-left { border-right: none; padding-right: 0; border-bottom: 1px solid var(--border); padding-bottom: 18px; } }
 
   .equity-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-secondary); margin-bottom: 4px; }
@@ -265,21 +237,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .pnl-chip.pos { background: rgba(16, 185, 129, 0.14); color: var(--emerald); border: 1px solid rgba(16, 185, 129, 0.3); }
   .pnl-chip.neg { background: rgba(244, 63, 94, 0.14); color: var(--rose); border: 1px solid rgba(244, 63, 94, 0.3); }
 
-  .equity-hero-right {
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-  }
-  .stat-triplet {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 12px;
-  }
+  .equity-hero-right { display: flex; flex-direction: column; gap: 14px; }
+  .stat-triplet { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
   .stat-box {
-    background: rgba(8, 12, 18, 0.55);
-    border: 1px solid rgba(255, 255, 255, 0.05);
-    border-radius: 9px;
-    padding: 10px 14px;
+    background: rgba(8, 12, 18, 0.55); border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 9px; padding: 10px 14px;
   }
   .stat-box-title { font-size: 11px; color: var(--text-muted); margin-bottom: 3px; }
   .stat-box-val { font-family: var(--font-mono); font-size: 16px; font-weight: 700; color: var(--text-primary); }
@@ -287,33 +249,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   /* Allocation Bar */
   .alloc-wrapper { display: flex; flex-direction: column; gap: 6px; }
   .alloc-header { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-secondary); }
-  .alloc-bar {
-    height: 10px; width: 100%; border-radius: 5px;
-    background: rgba(255, 255, 255, 0.05);
-    display: flex; overflow: hidden;
-  }
+  .alloc-bar { height: 10px; width: 100%; border-radius: 5px; background: rgba(255, 255, 255, 0.05); display: flex; overflow: hidden; }
   .alloc-seg { height: 100%; transition: width 0.3s; }
   .alloc-legend { display: flex; gap: 14px; font-size: 11px; flex-wrap: wrap; margin-top: 4px; }
   .legend-item { display: flex; align-items: center; gap: 5px; color: var(--text-secondary); }
   .legend-dot { width: 8px; height: 8px; border-radius: 2px; }
 
   /* 2-Column Core: Strategy Brain + Market Dynamics */
-  .grid-2 {
-    display: grid;
-    grid-template-columns: 1.15fr 1fr;
-    gap: 18px;
-    margin-bottom: 20px;
-  }
+  .grid-2 { display: grid; grid-template-columns: 1.15fr 1fr; gap: 18px; margin-bottom: 20px; }
   @media (max-width: 1080px) { .grid-2 { grid-template-columns: 1fr; } }
 
   .card {
-    background: var(--bg-card);
-    backdrop-filter: blur(14px);
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    padding: 18px 20px;
-    display: flex;
-    flex-direction: column;
+    background: var(--bg-card); backdrop-filter: blur(14px);
+    border: 1px solid var(--border); border-radius: 14px; padding: 18px 20px;
+    display: flex; flex-direction: column;
   }
   .card-header {
     display: flex; justify-content: space-between; align-items: center;
@@ -323,35 +272,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   /* Strategy Brain Card Specifics */
   .strat-name-box {
-    background: rgba(56, 189, 248, 0.08);
-    border: 1px solid rgba(56, 189, 248, 0.22);
-    border-radius: 9px;
-    padding: 10px 14px;
-    margin-bottom: 12px;
+    background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.22);
+    border-radius: 9px; padding: 10px 14px; margin-bottom: 12px;
   }
   .strat-name { font-family: var(--font-mono); font-size: 14px; font-weight: 700; color: var(--cyan); margin-bottom: 3px; }
   .strat-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.45; }
 
-  .params-pill-grid {
-    display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px;
-  }
+  .params-pill-grid { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
   .param-pill {
-    background: rgba(0, 0, 0, 0.35);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 6px;
-    padding: 4px 8px;
-    font-size: 11px;
-    font-family: var(--font-mono);
-    color: var(--text-secondary);
+    background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 6px; padding: 4px 8px; font-size: 11px; font-family: var(--font-mono); color: var(--text-secondary);
   }
   .param-pill b { color: var(--text-primary); }
 
   .decision-blotter {
-    background: rgba(8, 12, 18, 0.6);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 10px 12px;
-    font-size: 11.5px;
+    background: rgba(8, 12, 18, 0.6); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 12px; font-size: 11.5px;
   }
   .decision-title { font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; margin-bottom: 6px; }
   .decision-item { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.03); }
@@ -359,12 +295,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   /* Positions & Tables */
   .table-box {
-    background: var(--bg-card);
-    backdrop-filter: blur(14px);
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    padding: 18px 20px;
-    margin-bottom: 20px;
+    background: var(--bg-card); backdrop-filter: blur(14px);
+    border: 1px solid var(--border); border-radius: 14px; padding: 18px 20px; margin-bottom: 20px;
   }
   .table-wrap { overflow-x: auto; max-height: 380px; }
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
@@ -390,25 +322,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   }
   .tab-item:hover { color: var(--text-primary); }
   .tab-item.active { background: rgba(56, 189, 248, 0.15); color: var(--cyan); font-weight: 700; border: 1px solid rgba(56, 189, 248, 0.3); }
-
-  /* Arena Scorecard Styles */
-  .arena-grid {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 14px;
-  }
-  @media (max-width: 800px) { .arena-grid { grid-template-columns: 1fr; } }
-  .arena-card {
-    background: rgba(8, 12, 18, 0.6);
-    border: 1px solid var(--border); border-radius: 10px; padding: 16px;
-  }
-  .arena-winner { border-color: var(--emerald); box-shadow: 0 0 20px rgba(16, 185, 129, 0.12); }
-  .arena-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-  .arena-title { font-size: 14px; font-weight: 800; }
-  .arena-stat-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.03); font-size: 12px; }
-  .verdict-banner {
-    padding: 12px 16px; border-radius: 9px; background: rgba(16, 185, 129, 0.1);
-    border: 1px solid rgba(16, 185, 129, 0.3); color: var(--emerald); font-size: 13px; font-weight: 700;
-    margin-bottom: 14px; display: flex; align-items: center; gap: 8px;
-  }
 
   /* SVG Chart */
   .chart-box {
@@ -604,61 +517,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 </div>
 
-<!-- Bottom Section: Deep-Dive Tabs (Arena, Backtest Curve, Ratchet Timeline, Multi-Broker Custody, Code) -->
+<!-- Bottom Section: Deep-Dive Tabs (Backtest Curve, Ratchet Timeline, Multi-Broker Custody, Code) -->
 <div class="card">
   <div class="tabs-nav">
-    <div class="tab-item active" onclick="switchTab('tab-arena', this)">⚔️ 双 Agent 竞技场对决 (Arena)</div>
-    <div class="tab-item" onclick="switchTab('tab-curve', this)">📈 净值回测曲线 (Equity Curve)</div>
+    <div class="tab-item active" onclick="switchTab('tab-curve', this)">📈 净值回测曲线 (Equity Curve)</div>
     <div class="tab-item" onclick="switchTab('tab-timeline', this)">🧬 棘轮演化历史 (Ratchet Timeline)</div>
     <div class="tab-item" onclick="switchTab('tab-brokers', this)">🏦 多账户存管总账 (Master Ledger)</div>
     <div class="tab-item" onclick="switchTab('tab-code', this)">💻 策略源码 (strategy.py)</div>
   </div>
 
-  <!-- Tab 1: Arena -->
-  <div id="tab-arena" class="tab-pane">
-    <div class="verdict-banner" id="arena-verdict">
-      <span>🏆</span> <span id="arena-verdict-text">正在加载双 Agent 对决数据...</span>
-    </div>
-    <div class="arena-grid">
-      <div class="arena-card arena-winner" id="arena-card-a">
-        <div class="arena-head">
-          <div class="arena-title" style="color:var(--cyan)">Agent A: ATrader (Karpathy 棘轮)</div>
-          <span class="mode-btn active" style="font-size:10px;">PROTAGONIST</span>
-        </div>
-        <div class="arena-stat-row"><span>Ratchet 评分</span><b class="mono" id="ar-score-a">--</b></div>
-        <div class="arena-stat-row"><span>年化夏普比率 (Sharpe)</span><b class="mono pos" id="ar-sharpe-a">--</b></div>
-        <div class="arena-stat-row"><span>样本外净收益率</span><b class="mono pos" id="ar-ret-a">--</b></div>
-        <div class="arena-stat-row"><span>最大回撤 (MaxDD)</span><b class="mono neg" id="ar-dd-a">--</b></div>
-        <div class="arena-stat-row"><span>LLM Token API 成本</span><b class="mono" id="ar-cost-a">--</b></div>
-        <div class="arena-stat-row"><span>扣除成本后净利润</span><b class="mono pos" id="ar-profit-a">--</b></div>
-        <div class="arena-stat-row"><span>算力 ROI (利润/Token 成本)</span><b class="mono" style="color:var(--purple)" id="ar-roi-a">--</b></div>
-      </div>
-
-      <div class="arena-card" id="arena-card-b">
-        <div class="arena-head">
-          <div class="arena-title" style="color:var(--text-secondary)">Agent B: 对比系统 / 基准</div>
-          <span style="font-size:11px; color:var(--text-muted);">COMPETITOR</span>
-        </div>
-        <div class="arena-stat-row"><span>Ratchet 评分</span><b class="mono" id="ar-score-b">--</b></div>
-        <div class="arena-stat-row"><span>年化夏普比率 (Sharpe)</span><b class="mono" id="ar-sharpe-b">--</b></div>
-        <div class="arena-stat-row"><span>样本外净收益率</span><b class="mono" id="ar-ret-b">--</b></div>
-        <div class="arena-stat-row"><span>最大回撤 (MaxDD)</span><b class="mono neg" id="ar-dd-b">--</b></div>
-        <div class="arena-stat-row"><span>LLM Token API 成本</span><b class="mono" id="ar-cost-b">--</b></div>
-        <div class="arena-stat-row"><span>扣除成本后净利润</span><b class="mono" id="ar-profit-b">--</b></div>
-        <div class="arena-stat-row"><span>算力 ROI (利润/Token 成本)</span><b class="mono" id="ar-roi-b">--</b></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Tab 2: Equity Curve -->
-  <div id="tab-curve" class="tab-pane" style="display:none;">
+  <!-- Tab 1: Equity Curve -->
+  <div id="tab-curve" class="tab-pane">
     <div class="chart-box" id="chart-box">
       <div class="chart-tooltip" id="chart-tooltip"></div>
       <svg id="equity-svg" width="100%" height="100%"></svg>
     </div>
   </div>
 
-  <!-- Tab 3: Ratchet Timeline -->
+  <!-- Tab 2: Ratchet Timeline -->
   <div id="tab-timeline" class="tab-pane" style="display:none;">
     <div class="table-wrap">
       <table>
@@ -679,7 +555,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Tab 4: Multi-Broker Custody -->
+  <!-- Tab 3: Multi-Broker Custody -->
   <div id="tab-brokers" class="tab-pane" style="display:none;">
     <div class="table-wrap">
       <table>
@@ -698,7 +574,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Tab 5: Code Viewer -->
+  <!-- Tab 4: Code Viewer -->
   <div id="tab-code" class="tab-pane" style="display:none;">
     <pre style="background:#070b12; padding:14px; border-radius:8px; overflow-x:auto; font-size:12px; font-family:var(--font-mono);"><code id="code-viewer">Loading strategy.py...</code></pre>
   </div>
@@ -799,7 +675,6 @@ async function refreshDashboard() {
     const hist = data.ratchet_history || {};
     const posList = data.positions || [];
     const watchList = data.watchlist || [];
-    const arena = data.arena || {};
 
     // 1. Hero Portfolio
     const totalEq = port.total_equity_usd || 10000;
@@ -894,29 +769,7 @@ async function refreshDashboard() {
       }).join('');
     }
 
-    // 5. Arena Comparison
-    if (arena && arena.agent_a && arena.agent_b) {
-      const a = arena.agent_a;
-      const b = arena.agent_b;
-      document.getElementById('arena-verdict-text').textContent = arena.verdict_reason || arena.verdict;
-      document.getElementById('ar-score-a').textContent = a.score;
-      document.getElementById('ar-sharpe-a').textContent = a.sharpe;
-      document.getElementById('ar-ret-a').textContent = `+${a.net_return_pct}%`;
-      document.getElementById('ar-dd-a').textContent = `-${a.max_drawdown_pct}%`;
-      document.getElementById('ar-cost-a').textContent = `$${a.llm_cost_usd?.toFixed(5)}`;
-      document.getElementById('ar-profit-a').textContent = `$${a.profit_after_llm_usd?.toLocaleString()}`;
-      document.getElementById('ar-roi-a').textContent = `${a.model_roi}x`;
-
-      document.getElementById('ar-score-b').textContent = b.score;
-      document.getElementById('ar-sharpe-b').textContent = b.sharpe;
-      document.getElementById('ar-ret-b').textContent = `+${b.net_return_pct}%`;
-      document.getElementById('ar-dd-b').textContent = `-${b.max_drawdown_pct}%`;
-      document.getElementById('ar-cost-b').textContent = `$${b.llm_cost_usd?.toFixed(5)}`;
-      document.getElementById('ar-profit-b').textContent = `$${b.profit_after_llm_usd?.toLocaleString()}`;
-      document.getElementById('ar-roi-b').textContent = `${b.model_roi}x`;
-    }
-
-    // 6. Ratchet Timeline
+    // 5. Ratchet Timeline
     const gens = (hist.generations || []).slice().reverse();
     document.getElementById('timeline-tbody').innerHTML = gens.map(g => {
       const isKeep = (g.status || '').includes('LOCKED') || (g.status || '').includes('BASELINE');
@@ -934,7 +787,7 @@ async function refreshDashboard() {
       `;
     }).join('');
 
-    // 7. Brokers
+    // 6. Brokers
     const accounts = data.portfolio?.accounts || [];
     document.getElementById('broker-tbody').innerHTML = accounts.map(a => {
       const ok = (a.status || '').startsWith('connected');
@@ -950,7 +803,7 @@ async function refreshDashboard() {
       `;
     }).join('');
 
-    // 8. Code
+    // 7. Code
     document.getElementById('code-viewer').textContent = data.strategy_code || '';
   } catch (err) {
     console.error('Refresh error:', err);
