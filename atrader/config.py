@@ -51,14 +51,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "AAPL": "alpaca",
         "QQQ": "alpaca",
         "00700.HK": "longbridge",
+        "700.HK": "longbridge",
         "09988.HK": "longbridge",
     },
     # Capital custody & per-broker risk allocation caps (Virtual Master Ledger)
     "broker_allocations": {
         "local_paper": {"enabled": True, "capital_cap_usd": 10000.0, "max_drawdown_pct": 0.08},
-        "alpaca": {"enabled": False, "capital_cap_usd": 5000.0, "max_drawdown_pct": 0.05},
+        "alpaca": {"enabled": True, "capital_cap_usd": 100000.0, "max_drawdown_pct": 0.05},
         "ccxt": {"enabled": False, "capital_cap_usd": 3000.0, "max_drawdown_pct": 0.06},
-        "longbridge": {"enabled": False, "capital_cap_usd": 5000.0, "max_drawdown_pct": 0.05},
+        "longbridge": {"enabled": True, "capital_cap_usd": 10000.0, "max_drawdown_pct": 0.05},
     },
     # Broker credentials
     "alpaca_api_key": "",
@@ -140,12 +141,31 @@ def load_config() -> Dict[str, Any]:
             except Exception:
                 pass
 
+    # Sanitize Alpaca Base URL (strip trailing / and /v2)
+    alpaca_url = str(cfg.get("alpaca_base_url", "https://paper-api.alpaca.markets")).strip().rstrip("/")
+    if alpaca_url.endswith("/v2"):
+        alpaca_url = alpaca_url[:-3].rstrip("/")
+    cfg["alpaca_base_url"] = alpaca_url or "https://paper-api.alpaca.markets"
+
+    # Auto-activate brokers when credentials exist in .env
+    active_set = set(cfg.get("active_brokers", ["local_paper"]))
+    if cfg.get("alpaca_api_key") and cfg.get("alpaca_secret_key"):
+        active_set.add("alpaca")
+        cfg["broker_allocations"]["alpaca"]["enabled"] = True
+    if cfg.get("longbridge_app_key") and cfg.get("longbridge_access_token"):
+        active_set.add("longbridge")
+        cfg["broker_allocations"]["longbridge"]["enabled"] = True
+    if cfg.get("ccxt_api_key") and cfg.get("ccxt_secret_key"):
+        active_set.add("ccxt")
+        cfg["broker_allocations"]["ccxt"]["enabled"] = True
+
     if "ACTIVE_BROKERS" in merged_env and merged_env["ACTIVE_BROKERS"].strip():
-        brokers: List[str] = [
-            b.strip() for b in merged_env["ACTIVE_BROKERS"].split(",") if b.strip()
-        ]
-        if brokers:
-            cfg["active_brokers"] = brokers
+        user_specified = [b.strip() for b in merged_env["ACTIVE_BROKERS"].split(",") if b.strip()]
+        if user_specified and user_specified != ["local_paper"]:
+            active_set = set(user_specified)
+            active_set.add("local_paper")
+
+    cfg["active_brokers"] = list(active_set)
 
     if "CCXT_SANDBOX" in merged_env:
         cfg["ccxt_sandbox"] = merged_env["CCXT_SANDBOX"].lower() in ("1", "true", "yes")

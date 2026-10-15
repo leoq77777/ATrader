@@ -9,6 +9,7 @@ Commands:
   python3 main.py signal              -> Run Low-Frequency Signal Ratchet & update Shadow Trust weights
   python3 main.py trade [--loop]      -> Execute 0-Token live/paper trading step across active brokers
   python3 main.py portfolio           -> Inspect Virtual Master Ledger & multi-broker custody status
+  python3 main.py arena               -> Benchmark ATrader against another Trading Agent head-to-head
   python3 main.py ui [--port 8787]    -> Launch interactive Web Dashboard
 """
 
@@ -27,6 +28,7 @@ from atrader.ratchet import (
     run_live_trading_cycle,
 )
 from atrader.brokers import MultiBrokerRouter
+from atrader.arena import run_agent_comparison
 from atrader.web import run_web_server
 
 
@@ -53,7 +55,8 @@ def cmd_init() -> None:
     print("\nNext steps:")
     print("  1. Run `python3 main.py evolve --steps 2` to test the Keep/Revert Ratchet loop")
     print("  2. Run `python3 main.py trade` to execute a 0-token paper trading rebalance")
-    print("  3. Run `python3 main.py ui` to open the Web Dashboard at http://127.0.0.1:8787")
+    print("  3. Run `python3 main.py arena` to compare ATrader against Agent B")
+    print("  4. Run `python3 main.py ui` to open the Web Dashboard at http://127.0.0.1:8787")
 
 
 def cmd_backtest() -> None:
@@ -134,6 +137,49 @@ def cmd_portfolio() -> None:
         )
 
 
+def cmd_arena(agent_b_path: Optional[str] = None, name_b: str = "Competitor Agent B", cost_b: float = 0.05) -> None:
+    b_path = PROJECT_ROOT / agent_b_path if agent_b_path else (PROJECT_ROOT / "strategies" / "agent_b_template.py")
+    res = run_agent_comparison(
+        agent_b_path=b_path,
+        agent_b_name=name_b,
+        agent_b_llm_cost=cost_b,
+    )
+    a = res["agent_a"]
+    b = res["agent_b"]
+
+    ret_a_str = f"+{a['net_return_pct']}%"
+    ret_b_str = f"+{b['net_return_pct']}%"
+    dd_a_str = f"-{a['max_drawdown_pct']}%"
+    dd_b_str = f"-{b['max_drawdown_pct']}%"
+    profit_a_str = f"${a['net_profit_usd']:,.2f}"
+    profit_b_str = f"${b['net_profit_usd']:,.2f}"
+    cost_a_str = f"${a['llm_cost_usd']:.5f}"
+    cost_b_str = f"${b['llm_cost_usd']:.5f}"
+    net_a_str = f"${a['profit_after_llm_usd']:,.2f}"
+    net_b_str = f"${b['profit_after_llm_usd']:,.2f}"
+    roi_a_str = f"{a['model_roi']:.0f}x"
+    roi_b_str = f"{b['model_roi']:.0f}x"
+
+    print("\n" + "=" * 76)
+    print(" ⚔️  ATrader Dual-Agent Arena (Head-to-Head Comparison)  ⚔️")
+    print("=" * 76)
+    print(f"{'Performance Metric':<28} | {'Agent A (ATrader)':<20} | {b['name']:<20}")
+    print("-" * 76)
+    print(f"{'Ratchet Score (Higher is better)':<28} | {a['score']:<20} | {b['score']:<20}")
+    print(f"{'Annualized Sharpe Ratio':<28} | {a['sharpe']:<20} | {b['sharpe']:<20}")
+    print(f"{'Walk-Forward Net Return %':<28} | {ret_a_str:<20} | {ret_b_str:<20}")
+    print(f"{'Max Drawdown %':<28} | {dd_a_str:<20} | {dd_b_str:<20}")
+    print(f"{'Calmar Ratio (Ret / MaxDD)':<28} | {a['calmar_ratio']:<20} | {b['calmar_ratio']:<20}")
+    print(f"{'Gross Strategy Profit':<28} | {profit_a_str:<20} | {profit_b_str:<20}")
+    print(f"{'LLM API Token Cost':<28} | {cost_a_str:<20} | {cost_b_str:<20}")
+    print(f"{'Net Profit After LLM Cost':<28} | {net_a_str:<20} | {net_b_str:<20}")
+    print(f"{'Compute ROI (Profit / Token Cost)':<28} | {roi_a_str:<20} | {roi_b_str:<20}")
+    print("-" * 76)
+    print(f" 🏆 Verdict: {res['verdict']}")
+    print(f"    {res['verdict_reason']}")
+    print("=" * 76 + "\n")
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(
         prog="atrader",
@@ -157,6 +203,11 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     sub.add_parser("portfolio", help="View Multi-Broker Virtual Master Ledger & custody locations")
 
+    p_arena = sub.add_parser("arena", help="Benchmark ATrader against another Trading Agent head-to-head")
+    p_arena.add_argument("--agent-b", type=str, default="strategies/agent_b_template.py", help="Path to Agent B file")
+    p_arena.add_argument("--name-b", type=str, default="Competitor Agent B", help="Display name for Agent B")
+    p_arena.add_argument("--cost-b", type=float, default=0.05, help="Estimated LLM API cost in USD for Agent B")
+
     p_ui = sub.add_parser("ui", help="Start interactive Web Dashboard")
     p_ui.add_argument("--host", type=str, default="127.0.0.1", help="Host address")
     p_ui.add_argument("--port", type=int, default=8787, help="Port number")
@@ -175,6 +226,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         cmd_trade(loop=args.loop, interval=args.interval)
     elif args.command == "portfolio":
         cmd_portfolio()
+    elif args.command == "arena":
+        cmd_arena(agent_b_path=args.agent_b, name_b=args.name_b, cost_b=args.cost_b)
     elif args.command == "status":
         cmd_backtest()
         cmd_portfolio()
