@@ -4,11 +4,12 @@ ATrader Interactive Single-Page Web Dashboard & REST Server
 Trader-centric interface modeled after modern trading terminals (Robinhood,
 Binance, TradingView, Longbridge). Provides instant visibility into:
   1. Overall Portfolio Equity & PnL (Hero Bar & Asset Allocation Bar)
-  2. Active Strategy & Agent Brain (Strategy logic, parameters, recent trade rationale)
-  3. Live Open Positions (Holdings, cost basis, market value, unrealized PnL, target weight)
-  4. Asset Watchlist & Live Dynamics (Prices, recent change %, range, agent sentiment)
-  5. Performance & Walk-Forward Equity Curve
-  6. Karpathy Ratchet Mutation Timeline & Multi-Broker Custody Map
+  2. Autonomous Ratchet Auto-Pilot (Hands-free 24/7 research & trading daemon)
+  3. Active Strategy & Agent Brain (Strategy logic, parameters, recent trade rationale)
+  4. Live Open Positions (Holdings, cost basis, market value, unrealized PnL, target weight)
+  5. Asset Watchlist & Live Dynamics (Prices, recent change %, range, agent sentiment)
+  6. Performance & Walk-Forward Equity Curve
+  7. Karpathy Ratchet Mutation Timeline & Multi-Broker Custody Map
 """
 
 import json
@@ -27,6 +28,7 @@ from atrader.ratchet import (
     SIGNAL_REGIME_FILE,
 )
 from atrader.brokers import MultiBrokerRouter
+from atrader.daemon import daemon_instance
 
 
 def collect_dashboard_state() -> Dict[str, Any]:
@@ -52,6 +54,7 @@ def collect_dashboard_state() -> Dict[str, Any]:
     router = MultiBrokerRouter(cfg)
     portfolio = router.get_unified_portfolio()
     strategy_code = (PROJECT_ROOT / "strategy.py").read_text(encoding="utf-8")
+    daemon_state = daemon_instance.get_state()
 
     # Aggregate all positions across active accounts into a clean, flat list
     master = portfolio.get("virtual_master_ledger", {})
@@ -134,6 +137,7 @@ def collect_dashboard_state() -> Dict[str, Any]:
         "positions": flat_positions,
         "watchlist": watchlist_items,
         "active_strategy": active_strat,
+        "daemon": daemon_state,
         "evaluation": evaluation,
         "ratchet_history": history,
         "strategy_code": strategy_code,
@@ -186,7 +190,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   header {
     display: flex; justify-content: space-between; align-items: center; gap: 16px;
     padding: 14px 20px; background: var(--bg-card); backdrop-filter: blur(16px);
-    border: 1px solid var(--border); border-radius: 12px; margin-bottom: 20px;
+    border: 1px solid var(--border); border-radius: 12px; margin-bottom: 16px;
   }
   .brand { display: flex; align-items: center; gap: 12px; }
   .logo {
@@ -215,6 +219,39 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .btn.primary { background: linear-gradient(135deg, #0284c7, #0ea5e9); border-color: #38bdf8; color: #fff; box-shadow: 0 0 14px rgba(14, 165, 233, 0.3); }
   .btn.success { background: linear-gradient(135deg, #059669, #10b981); border-color: #34d399; color: #fff; box-shadow: 0 0 14px rgba(16, 185, 129, 0.3); }
   .btn.loading { opacity: 0.65; pointer-events: none; }
+
+  /* Autonomous Auto-Pilot Hero Bar */
+  .autopilot-bar {
+    background: linear-gradient(135deg, rgba(14, 25, 45, 0.85), rgba(15, 30, 40, 0.75));
+    border: 1px solid rgba(56, 189, 248, 0.25);
+    border-radius: 12px;
+    padding: 12px 20px;
+    margin-bottom: 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 14px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  }
+  .ap-left { display: flex; align-items: center; gap: 14px; }
+  .ap-switch {
+    display: flex; align-items: center; gap: 8px; cursor: pointer;
+    background: rgba(0, 0, 0, 0.4); border: 1px solid var(--border);
+    padding: 6px 14px; border-radius: 8px; font-weight: 700; font-size: 12px;
+    transition: all 0.2s;
+  }
+  .ap-switch.running {
+    background: rgba(16, 185, 129, 0.16); border-color: var(--emerald); color: var(--emerald);
+    box-shadow: 0 0 14px rgba(16, 185, 129, 0.25);
+  }
+  .ap-switch.paused {
+    background: rgba(245, 158, 11, 0.12); border-color: var(--amber); color: var(--amber);
+  }
+  .ap-timers { display: flex; align-items: center; gap: 18px; font-size: 12px; }
+  .timer-badge { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); }
+  .timer-badge b { font-family: var(--font-mono); color: var(--cyan); }
+  .budget-guard { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
 
   /* Hero Portfolio Overview */
   .hero-portfolio {
@@ -270,7 +307,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   }
   .card-title { font-size: 13.5px; font-weight: 700; display: flex; align-items: center; gap: 8px; letter-spacing: -0.2px; }
 
-  /* Strategy Brain Card Specifics */
+  /* Strategy Brain Card */
   .strat-name-box {
     background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.22);
     border-radius: 9px; padding: 10px 14px; margin-bottom: 12px;
@@ -334,6 +371,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     color: #fff; pointer-events: none; z-index: 10;
   }
 
+  /* Activity Feed */
+  .activity-feed {
+    background: rgba(8, 12, 18, 0.6);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 12px 14px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    max-height: 240px;
+    overflow-y: auto;
+  }
+  .activity-line {
+    padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.03); display: flex; gap: 10px;
+  }
+  .activity-line:last-child { border-bottom: none; }
+  .activity-time { color: var(--text-muted); }
+  .activity-tag { font-weight: 700; }
+  .activity-tag.AUTONOMOUS { color: var(--cyan); }
+  .activity-tag.RESEARCH { color: var(--purple); }
+  .activity-tag.TRADE { color: var(--emerald); }
+  .activity-tag.GUARDRAIL { color: var(--amber); }
+
   /* Toast Notification */
   #toast {
     position: fixed; bottom: 24px; right: 28px; background: rgba(15, 23, 42, 0.95);
@@ -386,6 +445,31 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </button>
   </div>
 </header>
+
+<!-- Autonomous Auto-Pilot Hero Bar -->
+<section class="autopilot-bar">
+  <div class="ap-left">
+    <button class="ap-switch paused" id="ap-toggle-btn" onclick="toggleAutoPilot()">
+      <span id="ap-dot" style="font-size:14px;">⏸</span>
+      <span id="ap-btn-text">自动驾驶双棘轮: 已暂停 (点击启动)</span>
+    </button>
+    <div class="ap-timers">
+      <div class="timer-badge">
+        <span>⏱️ 自动调仓风控:</span>
+        <b id="timer-trade">--s</b>
+      </div>
+      <div class="timer-badge">
+        <span>🧬 自动代码演化:</span>
+        <b id="timer-evolve">--m</b>
+      </div>
+    </div>
+  </div>
+
+  <div class="budget-guard">
+    <span>🛡️ 今日算力护栏:</span>
+    <b class="mono" id="budget-text" style="color:var(--emerald);">$0.00 / $0.50 限额</b>
+  </div>
+</section>
 
 <!-- Hero Section: Total Equity, PnL & Asset Allocation Bar -->
 <section class="hero-portfolio">
@@ -517,10 +601,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 </div>
 
-<!-- Bottom Section: Deep-Dive Tabs (Backtest Curve, Ratchet Timeline, Multi-Broker Custody, Code) -->
+<!-- Bottom Section: Deep-Dive Tabs (Backtest Curve, Ratchet Timeline, Auto-Pilot Activity Feed, Multi-Broker Custody, Code) -->
 <div class="card">
   <div class="tabs-nav">
     <div class="tab-item active" onclick="switchTab('tab-curve', this)">📈 净值回测曲线 (Equity Curve)</div>
+    <div class="tab-item" onclick="switchTab('tab-activity', this)">🤖 自动驾驶事件流 (Live Activity)</div>
     <div class="tab-item" onclick="switchTab('tab-timeline', this)">🧬 棘轮演化历史 (Ratchet Timeline)</div>
     <div class="tab-item" onclick="switchTab('tab-brokers', this)">🏦 多账户存管总账 (Master Ledger)</div>
     <div class="tab-item" onclick="switchTab('tab-code', this)">💻 策略源码 (strategy.py)</div>
@@ -534,7 +619,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Tab 2: Ratchet Timeline -->
+  <!-- Tab 2: Activity Feed -->
+  <div id="tab-activity" class="tab-pane" style="display:none;">
+    <div class="activity-feed" id="activity-log-feed">
+      <div class="activity-line"><span class="activity-time">[--:--:--]</span> <span class="activity-tag AUTONOMOUS">[SYSTEM]</span> 正在加载自动驾驶事件...</div>
+    </div>
+  </div>
+
+  <!-- Tab 3: Ratchet Timeline -->
   <div id="tab-timeline" class="tab-pane" style="display:none;">
     <div class="table-wrap">
       <table>
@@ -555,7 +647,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Tab 3: Multi-Broker Custody -->
+  <!-- Tab 4: Multi-Broker Custody -->
   <div id="tab-brokers" class="tab-pane" style="display:none;">
     <div class="table-wrap">
       <table>
@@ -574,7 +666,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Tab 4: Code Viewer -->
+  <!-- Tab 5: Code Viewer -->
   <div id="tab-code" class="tab-pane" style="display:none;">
     <pre style="background:#070b12; padding:14px; border-radius:8px; overflow-x:auto; font-size:12px; font-family:var(--font-mono);"><code id="code-viewer">Loading strategy.py...</code></pre>
   </div>
@@ -602,6 +694,14 @@ function switchTab(tabId, el) {
   if (tabId === 'tab-curve') {
     fetch('/api/state').then(r => r.json()).then(d => renderEquityChart(d.evaluation?.equity_curve || []));
   }
+}
+
+async function toggleAutoPilot() {
+  const res = await fetch('/api/daemon/toggle', { method: 'POST' });
+  const data = await res.json();
+  const running = data.is_running;
+  showToast(running ? '🤖 自动驾驶双棘轮已启动！' : '⏸ 自动驾驶双棘轮已暂停', running ? '🚀' : '⏸');
+  await refreshDashboard();
 }
 
 function renderEquityChart(curve) {
@@ -675,8 +775,40 @@ async function refreshDashboard() {
     const hist = data.ratchet_history || {};
     const posList = data.positions || [];
     const watchList = data.watchlist || [];
+    const daemon = data.daemon || {};
 
-    // 1. Hero Portfolio
+    // 1. Auto-Pilot Controls
+    const isRunning = Boolean(daemon.is_running);
+    const apBtn = document.getElementById('ap-toggle-btn');
+    apBtn.className = `ap-switch ${isRunning ? 'running' : 'paused'}`;
+    document.getElementById('ap-dot').textContent = isRunning ? '●' : '⏸';
+    document.getElementById('ap-btn-text').textContent = isRunning
+      ? '自动驾驶双棘轮: 持续运行中 (点击暂停)'
+      : '自动驾驶双棘轮: 已暂停 (点击一键启动)';
+
+    const tSec = daemon.next_trade_in_sec || 0;
+    const eSec = daemon.next_evolve_in_sec || 0;
+    document.getElementById('timer-trade').textContent = `${tSec}s`;
+    document.getElementById('timer-evolve').textContent = eSec > 60 ? `${Math.floor(eSec/60)}m ${eSec%60}s` : `${eSec}s`;
+
+    const spent = daemon.today_llm_spent_usd || 0;
+    const budget = daemon.daily_budget_usd || 0.50;
+    document.getElementById('budget-text').textContent = `$${spent.toFixed(4)} / $${budget.toFixed(2)} 限额`;
+
+    // Activity log
+    const logs = (daemon.recent_logs || []).slice().reverse();
+    document.getElementById('activity-log-feed').innerHTML = logs.map(l => {
+      const timeStr = new Date(l.ts * 1000).toLocaleTimeString();
+      return `
+        <div class="activity-line">
+          <span class="activity-time">[${timeStr}]</span>
+          <span class="activity-tag ${l.type}">[${l.type}]</span>
+          <span>${l.msg}</span>
+        </div>
+      `;
+    }).join('');
+
+    // 2. Hero Portfolio
     const totalEq = port.total_equity_usd || 10000;
     const totalCash = port.total_cash_usd || 0;
     const totalPos = port.total_positions_usd || 0;
@@ -705,7 +837,7 @@ async function refreshDashboard() {
       <div class="legend-item"><div class="legend-dot" style="background:#10b981"></div>股票/加密持仓 (${posPct}%)</div>
     `;
 
-    // 2. Active Strategy Brain
+    // 3. Active Strategy Brain
     document.getElementById('strat-name').textContent = strat.name || 'baseline';
     document.getElementById('strat-gen-badge').textContent = `Gen #${strat.generation || 0}`;
     document.getElementById('strat-desc').textContent = strat.description || '自适应双周期 EMA 顺势跟踪 + RSI 超卖抄底 + 动态 ATR 移动止损';
@@ -727,7 +859,7 @@ async function refreshDashboard() {
     }).join('');
     document.getElementById('decisions-list').innerHTML = decisionsHtml || '<div class="decision-item">运行平稳，监控中...</div>';
 
-    // 3. Watchlist Dynamics
+    // 4. Watchlist Dynamics
     document.getElementById('watchlist-tbody').innerHTML = watchList.map(w => {
       const chg = w.change_pct || 0;
       const isPos = chg >= 0;
@@ -744,11 +876,11 @@ async function refreshDashboard() {
       `;
     }).join('');
 
-    // 4. Positions Table
+    // 5. Positions Table
     document.getElementById('pos-count').textContent = `${posList.length} 项持仓`;
     if (posList.length === 0) {
       document.getElementById('positions-tbody').innerHTML = `
-        <tr><td colspan="9" style="text-align:center; color:var(--text-muted); padding:20px;">当前空仓。点击上方“立即调仓”或“演化新策略”即可自动建仓</td></tr>
+        <tr><td colspan="9" style="text-align:center; color:var(--text-muted); padding:20px;">当前空仓。启动自动驾驶或点击上方“立即调仓”即可自动建仓</td></tr>
       `;
     } else {
       document.getElementById('positions-tbody').innerHTML = posList.map(p => {
@@ -769,7 +901,7 @@ async function refreshDashboard() {
       }).join('');
     }
 
-    // 5. Ratchet Timeline
+    // 6. Ratchet Timeline
     const gens = (hist.generations || []).slice().reverse();
     document.getElementById('timeline-tbody').innerHTML = gens.map(g => {
       const isKeep = (g.status || '').includes('LOCKED') || (g.status || '').includes('BASELINE');
@@ -787,7 +919,7 @@ async function refreshDashboard() {
       `;
     }).join('');
 
-    // 6. Brokers
+    // 7. Brokers
     const accounts = data.portfolio?.accounts || [];
     document.getElementById('broker-tbody').innerHTML = accounts.map(a => {
       const ok = (a.status || '').startsWith('connected');
@@ -803,7 +935,7 @@ async function refreshDashboard() {
       `;
     }).join('');
 
-    // 7. Code
+    // 8. Code
     document.getElementById('code-viewer').textContent = data.strategy_code || '';
   } catch (err) {
     console.error('Refresh error:', err);
@@ -837,6 +969,7 @@ async function changeMode(mode) {
 
 window.addEventListener('load', () => {
   refreshDashboard();
+  setInterval(refreshDashboard, 3000); // Auto-refresh UI every 3s
   window.addEventListener('resize', () => {
     fetch('/api/state').then(r => r.json()).then(d => renderEquityChart(d.evaluation?.equity_curve || []));
   });
@@ -880,7 +1013,19 @@ class ATraderDashboardHandler(BaseHTTPRequestHandler):
         except Exception:
             body = {}
 
-        if parsed.path == "/api/evolve":
+        if parsed.path == "/api/daemon/toggle":
+            res = daemon_instance.toggle()
+            self._send_json(res)
+        elif parsed.path == "/api/daemon/start":
+            res = daemon_instance.start(
+                trade_interval=int(body.get("trade_interval_sec", 60)),
+                evolve_interval=int(body.get("evolve_interval_sec", 1800)),
+            )
+            self._send_json(res)
+        elif parsed.path == "/api/daemon/stop":
+            res = daemon_instance.stop()
+            self._send_json(res)
+        elif parsed.path == "/api/evolve":
             res = run_code_ratchet_step(steps=int(body.get("steps", 1)))
             self._send_json(res)
         elif parsed.path == "/api/signal":

@@ -2,6 +2,8 @@
 ATrader User-Friendly CLI
 =========================
 Commands:
+  python3 main.py daemon              -> Start autonomous dual-ratchet loop (Auto-pilot research & trading)
+  python3 main.py run                 -> Alias for daemon
   python3 main.py init                -> Initialize `.env`, baseline backtest, and ratchet state
   python3 main.py status              -> Show current ratchet score, active strategy, and portfolio summary
   python3 main.py backtest            -> Run Walk-Forward evaluation on `strategy.py`
@@ -27,6 +29,7 @@ from atrader.ratchet import (
     run_live_trading_cycle,
 )
 from atrader.brokers import MultiBrokerRouter
+from atrader.daemon import daemon_instance
 from atrader.web import run_web_server
 
 
@@ -51,9 +54,39 @@ def cmd_init() -> None:
     print(f"Signal Regimes Ready  : {', '.join(sig['regimes'].keys())}")
     print(f"Master Ledger Equity  : ${port['virtual_master_ledger']['total_equity_usd']:,.2f}")
     print("\nNext steps:")
-    print("  1. Run `python3 main.py evolve --steps 2` to test the Keep/Revert Ratchet loop")
-    print("  2. Run `python3 main.py trade` to execute a 0-token paper trading rebalance")
-    print("  3. Run `python3 main.py ui` to open the Web Dashboard at http://127.0.0.1:8787")
+    print("  1. Run `python3 main.py daemon` to launch autonomous 24/7 research & trading")
+    print("  2. Run `python3 main.py ui` to open the Web Dashboard at http://127.0.0.1:8787")
+
+
+def cmd_daemon(trade_interval: int = 60, evolve_interval: int = 1800, budget: float = 0.50) -> None:
+    print("\n" + "=" * 76)
+    print(" 🤖 ATrader Autonomous Ratchet Auto-Pilot (无人值守双棘轮) 🤖")
+    print("=" * 76)
+    print(f" - 交易调仓循环 : 每 {trade_interval} 秒检查一次行情与持仓 (0 运行时 Token)")
+    print(f" - 策略研究循环 : 每 {evolve_interval} 秒 (或盘后) 调用一次 LLM 演化 strategy.py")
+    print(f" - 日算力保护栏 : 每日最多消耗 ${budget:.2f} 大模型费用 (超出自动休眠代码演化)")
+    print(" - 退出方式     : 按 Ctrl+C 安全停止")
+    print("=" * 76 + "\n")
+
+    daemon_instance.start(trade_interval=trade_interval, evolve_interval=evolve_interval)
+
+    try:
+        while True:
+            state = daemon_instance.get_state()
+            logs = state.get("recent_logs", [])
+            latest_msg = logs[-1]["msg"] if logs else "Running..."
+            print(
+                f"\r[Auto-Pilot] Trade in: {state.get('next_trade_in_sec', 0):>2d}s | "
+                f"Evolve in: {state.get('next_evolve_in_sec', 0):>4d}s | "
+                f"Spent: ${state.get('today_llm_spent_usd', 0.0):.4f}/${budget:.2f} | {latest_msg[:42]}",
+                end="",
+                flush=True,
+            )
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n\nStopping Auto-Pilot...")
+        daemon_instance.stop()
+        print("Auto-Pilot successfully paused.")
 
 
 def cmd_backtest() -> None:
@@ -145,6 +178,13 @@ def main(argv: Optional[List[str]] = None) -> None:
     sub.add_parser("status", help="Display current ratchet status and portfolio overview")
     sub.add_parser("backtest", help="Run walk-forward backtest on strategy.py")
 
+    p_daemon = sub.add_parser("daemon", help="Run autonomous 24/7 research & trading daemon")
+    p_daemon.add_argument("--trade-interval", type=int, default=60, help="Seconds between trading cycles")
+    p_daemon.add_argument("--evolve-interval", type=int, default=1800, help="Seconds between strategy evolution cycles")
+    p_daemon.add_argument("--budget", type=float, default=0.50, help="Daily LLM spend limit in USD")
+
+    sub.add_parser("run", help="Alias for daemon")
+
     p_evolve = sub.add_parser("evolve", help="Run Karpathy Code Ratchet steps to evolve strategy.py")
     p_evolve.add_argument("--steps", type=int, default=1, help="Number of evolution generations to run")
     p_evolve.add_argument("--mock", action="store_true", help="Force local heuristic mutation ($0 API cost)")
@@ -163,7 +203,12 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     args = parser.parse_args(argv)
 
-    if args.command == "init":
+    if args.command in ("daemon", "run"):
+        t_int = getattr(args, "trade_interval", 60)
+        e_int = getattr(args, "evolve_interval", 1800)
+        b = getattr(args, "budget", 0.50)
+        cmd_daemon(trade_interval=t_int, evolve_interval=e_int, budget=b)
+    elif args.command == "init":
         cmd_init()
     elif args.command == "backtest":
         cmd_backtest()
