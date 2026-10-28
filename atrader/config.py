@@ -7,6 +7,7 @@ import os
 import json
 from pathlib import Path
 from typing import Dict, Any, List
+from atrader.universe import SECTORS, BENCHMARK, UNIVERSE_VERSION, validate_universe
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATE_DIR = PROJECT_ROOT / "state"
@@ -36,12 +37,27 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "llm_model": "deepseek-chat",
     "llm_cost_input_per_1m": 0.27,
     "llm_cost_output_per_1m": 1.10,
+    "market_data_source": "alpaca",
+    "market_interval": "1d",
+    "investment_scope": UNIVERSE_VERSION,
+    "benchmark_symbol": BENCHMARK,
+    "max_holdings": 3,
+    "rank_buffer": 1,
+    "max_gross_exposure": 0.75,
+    "research_bars": 1000,
+    "execution_mode": "paper",
+    "execution_provider": "alpaca",
+    "execution_market_data_source": "alpaca",
+
     # Ratchet settings: code_ratchet | signal_ratchet | hybrid
-    "ratchet_mode": "hybrid",
+    "ratchet_mode": "code_ratchet",
     "min_score_improvement": 0.015,
+    # Research may archive candidates, but must not replace the Paper execution version.
+    "paper_execution_frozen": True,
+    "paper_observation_enabled": False,
     "signal_interval_hours": 4,
     # Active brokers & Multi-broker capital routing
-    "active_brokers": ["local_paper"],
+    "active_brokers": ["alpaca"],
     "symbol_routing": {
         "BTC/USDT": "ccxt",
         "ETH/USDT": "ccxt",
@@ -79,7 +95,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "max_daily_drawdown_pct": 0.05,
     "trading_fee_bps": 5.0,
     "slippage_bps": 3.0,
-    "watchlist": ["BTC/USDT", "ETH/USDT", "NVDA", "SPY"],
+    "watchlist": list(SECTORS),
 }
 
 
@@ -115,6 +131,8 @@ def load_config() -> Dict[str, Any]:
         "LLM_MODEL": ("llm_model", str),
         "LLM_COST_INPUT_PER_1M": ("llm_cost_input_per_1m", float),
         "LLM_COST_OUTPUT_PER_1M": ("llm_cost_output_per_1m", float),
+        "MARKET_DATA_SOURCE": ("market_data_source", str),
+        "SIGNAL_INTERVAL_HOURS": ("signal_interval_hours", float),
         "RATCHET_MODE": ("ratchet_mode", str),
         "ALPACA_API_KEY": ("alpaca_api_key", str),
         "ALPACA_SECRET_KEY": ("alpaca_secret_key", str),
@@ -147,25 +165,17 @@ def load_config() -> Dict[str, Any]:
         alpaca_url = alpaca_url[:-3].rstrip("/")
     cfg["alpaca_base_url"] = alpaca_url or "https://paper-api.alpaca.markets"
 
-    # Auto-activate brokers when credentials exist in .env
-    active_set = set(cfg.get("active_brokers", ["local_paper"]))
-    if cfg.get("alpaca_api_key") and cfg.get("alpaca_secret_key"):
-        active_set.add("alpaca")
-        cfg["broker_allocations"]["alpaca"]["enabled"] = True
-    if cfg.get("longbridge_app_key") and cfg.get("longbridge_access_token"):
-        active_set.add("longbridge")
-        cfg["broker_allocations"]["longbridge"]["enabled"] = True
-    if cfg.get("ccxt_api_key") and cfg.get("ccxt_secret_key"):
-        active_set.add("ccxt")
-        cfg["broker_allocations"]["ccxt"]["enabled"] = True
-
-    if "ACTIVE_BROKERS" in merged_env and merged_env["ACTIVE_BROKERS"].strip():
-        user_specified = [b.strip() for b in merged_env["ACTIVE_BROKERS"].split(",") if b.strip()]
-        if user_specified and user_specified != ["local_paper"]:
-            active_set = set(user_specified)
-            active_set.add("local_paper")
-
-    cfg["active_brokers"] = list(active_set)
+    # Scope is fixed by the reviewed harness, not inferred from broker credentials.
+    cfg["watchlist"] = validate_universe(cfg.get("watchlist", list(SECTORS)))
+    cfg["benchmark_symbol"] = BENCHMARK
+    cfg["investment_scope"] = UNIVERSE_VERSION
+    cfg["market_interval"] = "1d"
+    cfg["execution_mode"] = "paper"
+    cfg["execution_provider"] = "alpaca"
+    cfg["execution_market_data_source"] = "alpaca"
+    cfg["active_brokers"] = ["alpaca"]
+    for name, allocation in cfg.get("broker_allocations", {}).items():
+        allocation["enabled"] = name == "alpaca"
 
     if "CCXT_SANDBOX" in merged_env:
         cfg["ccxt_sandbox"] = merged_env["CCXT_SANDBOX"].lower() in ("1", "true", "yes")
@@ -173,9 +183,18 @@ def load_config() -> Dict[str, Any]:
     return cfg
 
 
+def write_json_atomic(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(path)
+
+
 def save_config(new_cfg: Dict[str, Any]) -> Dict[str, Any]:
     ensure_state_dir()
     current = load_config()
     current.update(new_cfg)
-    CONFIG_FILE.write_text(json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8")
+    private = {'llm_api_key', 'alpaca_api_key', 'alpaca_secret_key', 'ccxt_api_key', 'ccxt_secret_key',
+               'ccxt_password', 'longbridge_app_key', 'longbridge_app_secret', 'longbridge_access_token'}
+    write_json_atomic(CONFIG_FILE, {k:v for k,v in current.items() if k not in private})
     return current

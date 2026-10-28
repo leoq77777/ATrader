@@ -2,8 +2,32 @@ __pycache__/
 *.py[cod]
 *$py.class
 .env
+.env.*
+!.env.example
 .venv/
 venv/
 *.egg-info/
 .DS_Store
 state/candidate_strategy_tmp.py
+
+# Runtime ledgers, credentials-derived config, datasets and experiment results
+state/
+strategy.next.py
+
+# Generated research/deployment reports can contain account data and licensed prices.
+/reports/
+
+# Local logs, account databases, backups and deployment secrets
+*.log
+*.sqlite*
+*.db
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+/backup*/
+dashboard-login.txt
+*.htpasswd
+*.pem
+*.key
+*.p12

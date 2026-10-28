@@ -1,3 +1,7 @@
+> 历史设计说明：本页包含已过时的多券商和本地模拟设想，不代表当前已启用能力。后续工程边界以[投资实验架构定稿](AGENT_HARNESS_ARCHITECTURE.md)为准；当前仅连接 Alpaca Paper，完整 Paper 验收与回滚尚未落地。
+
+> 历史设计文档：以下多券商自动路由说明已退役。当前版本仅运行美股行业 ETF 的共享资金模拟盘；以根目录 README 和 deploy/README.md 为准。IBKR/实盘接入尚未实现。
+
 # ATrader 架构指南：两种棘轮模式对比与多交易 API 实盘资金存管方案
 
 ## 一、两种棘轮模式（Code Ratchet vs. Signal Ratchet）谁更好？

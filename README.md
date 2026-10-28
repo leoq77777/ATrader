@@ -1,57 +1,94 @@
-# ATrader — 极简闭环棘轮量化交易系统 (The Karpathy Ratchet Model)
+# ATrader — 极简美股行业轮动研究系统
 
-ATrader 是一个受 Andrej Karpathy `autoresearch` 极简闭环思想启发构建的轻量级 Agent Trader。它通过 **“模型演化与确定性执行解耦 + 单向棘轮锁定（Keep if strictly better, Revert if worse）”**，在 **Model Cost（大模型 Token 成本）** 与 **Strategy Profit（策略净收益）** 之间取得最优平衡，并提供开箱即用的 **CLI + 单页 Web 监控看板**。
+> 后续工程遵循[投资实验架构定稿](docs/AGENT_HARNESS_ARCHITECTURE.md)：模型拥有方法自由，harness 掌握实验规则和执行边界，人掌握投资授权。该文档明确目标行为与实现缺口；以下章节描述当前行业轮动实现，不能视为完整 Paper 验收与回滚已经上线。
 
-## 1. 核心架构：双模式与混合棘轮 (Code Ratchet + Signal Ratchet)
+以美股权益资产为范围，使用非杠杆行业 ETF 作为行业暴露载体，宽基 SPY 仅作市场参照与买入持有基准。当前连接 Alpaca Paper Trading，仅向券商模拟盘下单；不连接真实资金账户，不覆盖港股、多币种、期权、期货或加密资产。个股研究留待后续独立验证。
 
-系统内置三种可一键切换的棘轮模式（默认启用 `hybrid` 混合棘轮）：
+## 极简边界
 
-| 棘轮模式 | 运作机制 | Token 消耗与适用场景 |
-| :--- | :--- | :--- |
-| **`code_ratchet`（策略代码演化棘轮）** | Agent 读取唯一可变策略文件 [`strategy.py`](./strategy.py) 与历史回测弱点，调用 [DeepSeek API](https://api-docs.deepseek.com/) 生成新策略代码；由不可篡改的评估器 [`atrader/evaluator.py`](./atrader/evaluator.py) 进行 70% 训练集 + 30% 样本外验证集回测（扣除手续费、滑点与 LLM 调用成本）。得分严格优于历史最优才锁定保存（`LOCKED`），否则立即回滚（`REVERTED`）。 | **实盘盯盘 0 Token**；仅在盘后/定周期演化时消耗极少 Token，计算性价比最高 |
-| **`signal_ratchet`（低频信号与影子信任棘轮）** | Agent 仅在低频周期（如 4 小时 / 日线）读取压缩后的多标的指标摘要（约 250 Tokens），输出市场趋势偏置（`trend_bias`）与风险缩放（`risk_scale`）。内置 **影子账本（Shadow Ledger）** 追踪历史信号胜率，自动调升或降低信号信任权重（`trust_weight`）。 | 适合捕捉宏观与跨市场状态切换，用影子盘胜率防止大模型幻觉直接亏损实盘本金 |
-| **`hybrid`（双层混合棘轮，默认推荐）** | 底层由 [`strategy.py`](./strategy.py) 0-Token 毫秒级执行日内/波段择时与 ATR 移动止损；顶层叠加 `signal_ratchet` 的低频市场状态乘数（按 `trust_weight` 动态加权）。 | 兼具 0-Token 高频风控执行与低频大模型宏观感知能力 |
+- `strategy.py` 是自主研究唯一可变文件：`Strategy.rank_assets(history, positions)` 返回行业评分、资格、敞口和解释。评分为无跨调用隐藏状态的纯决策：每次获得全新策略命名空间，需要状态时从行情和持仓重建。
+- `atrader/portfolio.py` 是固定回测组合引擎；`alpaca_execution.py` 使用同样的目标权重与现金约束提交券商模拟单，实际成交由 Alpaca 确认。
+- `atrader/backtest.py` 是固定时间与评估协议：按交易日期对齐，使用过去已收盘日线生成信号，在下一根日线开盘模拟成交。
+- `atrader/strategy_runner.py`、`worker.py` 在独立子进程运行受限 Python 策略，清空凭据环境；限制为 math 导入，禁止 I/O、反射和私有模块属性、模块修改等（允许策略自身的纯计算辅助方法）。墙钟 45 秒、CPU 30 秒；Ubuntu/Linux 上内存 512 MiB。它是专用受限策略接口，未经通用恶意 Python 沙箱安全审计，不提供任意 Python 执行服务。
+- `atrader/evaluator.py` 冻结、编号并保存实验数据，评分由固定代码计算。模型不能自行报告实验成绩。
+- `atrader/ratchet.py` 生成候选并在冻结样本上比较。`paper_execution_frozen` 默认 `true`：达标候选照常保存源码、评分、费用及档案，但不会替换 Paper 使用的 `strategy.py`；记录为 `CANDIDATE (PAPER FROZEN)`。这不是 Paper 验收通过。
 
-## 2. 多交易 API 实盘资金存管与路由机制 (Virtual Master Ledger)
+整个服务仍为 Python 标准库、单进程调度，加短生命周期研究子进程；不需要微服务、消息队列或外部数据库。
 
-**交易 API 只是加密指令通道，本身绝不托管资金**。当启用多个交易接口时，你的实盘资金始终安全存放在你本人在各合规券商/交易所开设的独立账户中，由 [`atrader/brokers.py`](./atrader/brokers.py) 中的 `MultiBrokerRouter`（虚拟总账本）统一调度与限额风控：
+## 初始研究范围与风险约束
 
-- **本地模拟盘 (`local_paper`)**：默认激活，账本保存在 `state/paper_account.json`，无需入金即可跑通完整棘轮与调仓闭环。
-- **美股与加密聚合账户 ([Alpaca Trading API](https://docs.alpaca.markets/us/docs/trading-api))**：若希望**所有实盘资金放在同一个账户**同时交易美股（`NVDA`、`SPY`）与主流加密货币（`BTC/USD`、`ETH/USD`），推荐只入金 Alpaca 一家券商账户，免去跨平台划转资金。
-- **全币种加密交易所 ([CCXT](https://docs.ccxt.com/))**：支持 Binance、OKX、Bybit、Coinbase 等 100+ 交易所，实盘 USDT/USDC 存放在对应交易所现货/统一账户。
-- **港美股券商账户 ([Longbridge OpenAPI](https://open.longbridge.com/docs/getting-started))**：支持港股（如 `00700.HK`）与美股，实盘港币/美元存放在长桥证券账户。
+固定行业池：XLB、XLC、XLE、XLF、XLI、XLK、XLP、XLRE、XLU、XLV、XLY，代表标普 500 的 11 个行业。SPY 是基准，不参与行业仓位，避免宽基与行业重复计仓。该池是研究载体，不是已经验证的投资组合。
 
-## 3. 60 秒快速上手 (Zero-Dependency Quickstart)
+默认最多持有 3 个符合条件的行业，每个不超过账户净值 25%，总敞口不超过 75%，允许保留更多现金；排名退出缓冲为 1 名。每日正常交易时段执行一次组合调仓，休市不交易，同日重启不重复调仓。模型只能评分，不能扩大允许标的或突破资金限制。所有买单共用一份现金，先卖出再买入。
 
-项目核心运行库完全基于 Python 3 标准库实现，**无需预装任何第三方依赖即可直接启动 CLI 与 Web 看板**（连接实盘 SDK 时可按需执行 `pip install -r requirements.txt`）。
+## 回测与数据
+
+在线模拟账户、持仓、余额、历史订单均来自 Alpaca Paper Trading；只允许 `https://paper-api.alpaca.markets`，不允许实盘端点，也不在 API 失败时回退到本地账本。在线信号和价格使用 Alpaca IEX 日线与最新成交，权限已只读验证。IEX 不是全市场 SIP 行情，价格与回测数据及券商撮合可能不同。
+
+活跃策略已迁入同一份 Alpaca IEX 历史日线重新评分，并从 Alpaca 公司行动接口补入现金分红；拆股前的每股分红按后续已生效拆股换算，保持与调整后价格相同单位。旧 Yahoo 批次与旧成绩保留归档。迁移继承原试验次数、累计成本、固定预算和最终留出日期边界，不把换数据源当作新的独立验证集。研究和执行行情来源在“提供方”入口展示。
+
+每个研究批次取最近 1,000 根已收盘日线，按日期取各序列交集，之后冻结样本与公开约束，批次内不滚动换数据。前 80% 用作研究：252 根预热、样本内区间及两个按时间推进的验证区间；最后 20% 不参与自动晋级。每个区间独立初始化策略与共享账户，当前低频模型观察不倒灌历史。候选和现有策略共用完全相同的数据快照与成本口径。
+
+`state/datasets/<hash>.json` 保存可复现的实验样本和公开约束；`state/experiments/` 保存成功和失败候选源码、哈希及结果。自动评分包括验证风险收益、回撤、相对 SPY 表现和模型成本，提升至少 0.015 仅代表达到旧回测门槛；默认冻结执行版本，不自动晋级到 Paper。反复试验会适应验证集，验证得分不等于独立盈利证明；`audit` 只在批次预算结束后允许显式执行一次，结果不反馈给研究提示词、不参与晋升。既往对验证数据的研究不会因新批次而变成独立证据。
+
+研究现金分红按数据源 ex-date 入账，价格采用拆股调整单位。Alpaca Paper 不模拟分红；后续验收须将分红绩效调整与原始券商余额分开记录，调整不得增加可交易现金，具体规则见架构定稿。此口径仍不包含税、分红支付日时差、复杂公司行动、真实券商最低佣金、部分成交及市场冲击。当前为可验证研究 harness，不是已具备全部市场细节的实盘系统。
+
+## 多路径研究（isolated_search_v1）
+
+每次调度仍只发一个提案请求，按独立探索、冠军改进、档案分支轮换。独立探索只收到研究区间的可计算行情摘要和接口约束；冠军路径只看冠军及其测量指标；档案路径只看一个与冠军不同的历史分支。没有其他分支时回到独立探索。停止注入最近五轮实验，不预设趋势或反转等算法家族。API 失败记录为失败，不自动用本地变异冒充模型研究；`--mock` 仍用于显式离线检查。
+
+`state/research/campaign.json` 固定单批最多 120 个候选、估算成本 $1，任一预算达到后停止新提案，不自动开新批次。继续模拟执行现有策略。默认每日 $0.50 的调度预算继续生效，日期按纽约时区；成本为调用前检查，最后一次调用可能越过费用门槛。所有提案先登记再调用 API，语法错误、重复提案、API 失败、被淘汰和崩溃中断都占用候选次数；旧研究记录数量单独展示，不隐去既往搜索。未知供应商计费无法从网络失败中可靠恢复。
+
+档案最多 12 个成员，按两个验证区间的逐日目标权重计算平均 L1 距离（0.04 为近似行为阈值），保留距当前档案最高分 0.15 以内的候选；同类仅保留较优者。AST 哈希用于去除完全相同的语法树，不声称判断经济逻辑原创性。新颖性不计入评分；冻结开关开启期间，任何候选都不能自动成为执行策略。阈值是首版固定工程规则，需要通过后续研究评估有效性。
+
+提示词、父分支、Token、费用、错误、档案接纳原因和策略源码均持久化。冻结研究样本有哈希校验；最终 20% 单独保存为权限 600 的 `sealed_holdout.json`，不发送给正常研究 worker，也不通过看板提供。批次结束后 `audit` 固定当时策略快照，登记一次考试访问，再进行最终审计。这里是应用层隔离，并非另一个安全主体保管的密封环境；程序管理员仍有访问权限。
+
+晋升时间和源码哈希记录为前向观察起点，后续每日模拟决策也记录实际运行源码哈希。预算停止、留出隔离和试验计数减少无限适应，仍不是多重检验校正或独立盈利证明。新批次需要人工审查研究协议、保存旧批次、确认新时间数据和预算后再启动，不能通过重置计数重用验证集来宣称独立样本外表现。
+
+## 运行
 
 ```bash
-# 1. 初始化配置文件 (.env)、基准策略回测与本地模拟账本
+# 新项目先创建配置；已有部署升级请使用迁移流程并先备份
+cp .env.example .env
 python3 main.py init
-
-# 2. 配置你的 DeepSeek API Key (未配置时自动使用内置启发式演化器免费体验)
-# 编辑 .env 填入: LLM_API_KEY=sk-...
-
-# 3. 运行 3 轮 Karpathy 代码棘轮演化 (自动演示 LOCKED 晋级与 REVERTED 回滚)
-python3 main.py evolve --steps 3
-
-# 4. 更新低频市场状态信号棘轮 (Signal Ratchet)
-python3 main.py signal
-
-# 5. 执行一轮 0-Token 模拟/实盘自动调仓并查看多账户虚拟总账本
-python3 main.py trade
-python3 main.py portfolio
-
-# 6. 启动交互式单页 Web 看板 (默认 http://127.0.0.1:8787)
+python3 main.py backtest
+python3 main.py evolve --steps 1
+python3 main.py daemon
 python3 main.py ui --port 8787
+
+# 阶段性手动审计保留区间，不参与自动晋级
+python3 main.py audit
+
+# 回归测试（无外部 API 调用）
+python3 -m unittest discover -s tests -v
 ```
 
-## 4. 目录结构
+在 `.env` 中配置自己的 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL`，以及 `ALPACA_API_KEY`、`ALPACA_SECRET_KEY`、`ALPACA_BASE_URL=https://paper-api.alpaca.markets`。研究每 30 分钟执行一次，交易轮询每 60 秒检查是否到新交易日，实际每日最多调仓一次。CLI `--budget` 设置每日模型费用估算上限，按调用前检查，非供应商账单硬上限。API Token 和估算费用写入研究历史。
 
-- [`main.py`](./main.py)：统一命令行入口。
-- [`strategy.py`](./strategy.py)：**唯一可变策略文件**（由棘轮引擎自动演化或回滚，内置纯 Python 指标库）。
-- [`atrader/evaluator.py`](./atrader/evaluator.py)：**不可变裁判引擎**（样本内外分段回测、手续费/滑点/Token 成本扣除与 `ratchet_score` 计算）。
-- [`atrader/ratchet.py`](./atrader/ratchet.py)：双模棘轮控制器（支持 `code_ratchet`、`signal_ratchet` 与 `hybrid`）。
-- [`atrader/brokers.py`](./atrader/brokers.py)：四大交易通道适配器（`local_paper`、`alpaca`、`ccxt`、`longbridge`）及多账户虚拟总账本。
-- [`atrader/web.py`](./atrader/web.py)：零依赖响应式单页 Web 监控看板与 REST API。
-- [`.env.example`](./.env.example)：DeepSeek API 与多交易接口配置模板。
+## 看板与历史
+
+看板只读，所有 POST 请求返回 405。右上角“提供方”可查看模拟账本、行情来源、模型 API 服务、配置名称与最近成功响应的模型/版本标识；滚动别名未返回固定版本时明确标注，后端指纹不当作版本号。显示资产环图、行业排名、组合计划、持仓、清仓原因、每轮决策、研究历史以及共享组合/SPY 回测净值。盘后排名预览明确标注为未执行，不修改资金或订单。可选低频信号仅为观察项，不干预无法在历史中重放的仓位。
+
+Alpaca 是线上账户事实来源。本地旧 `paper_account.json` 和开户时间信息迁入 `state/archives/`，不再混入券商余额或盈亏。`state/alpaca_execution.json` 仅保存订单意图和核对状态，不维护余额。`state/decisions.sqlite3` 保存执行审计，`state/ratchet_history.json` 和 `state/snapshots/` 保存研究历史。旧规则得分不与新组合评分直接比较。旧合成账本与已退役研究源归档保留。
+
+部署、迁移、回滚和公网访问见 [deploy/README.md](deploy/README.md)。
+
+## Alpaca 模拟执行与恢复
+
+只在 Alpaca 交易时钟开放时提交市场价 `day` 小数股订单，不用保证金购买力做仓位预算。目标权重维持最多三只、单只 25%、总敞口 75%；范围外既有持仓（如 NVDA）保留，并从行业 ETF 可用总敞口中扣除。现金至少预留账户净值 25%，预估价格留有缓冲；价格波动仍可能使成交后比例短暂偏离目标。
+
+先持久化每日固定的 client_order_id 和订单意图，再提交订单。每次恢复先按同一个 client_order_id 查询；已接受的单不重建新 ID，卖单未全部确认成交前不规划买单。部分成交继续等待，拒单或取消后停止当日后续交易，未知挂单阻断新单。不会为了接口测试额外建立和清理仓位。休市验收只核对账户、持仓、挂单和信号预览；首次真实模拟成交需在下一交易时段观察 Alpaca 回报。
+
+看板收益为 Alpaca `equity - last_equity` 的当日盈亏，持仓浮盈亏另列；不再把本地账本累计收益当作券商收益。清仓记录从最近 500 笔已关闭订单还原，费用未报告时不虚构实际费用，历史不完整时不虚构成本。看板读取失败返回 503 并显示数据过期状态，不能降级显示一份假的本地账户。
+
+## 活跃策略重评
+
+`atrader/rebaseline.py` 只收集当前执行策略与当前档案，按 AST 去重，不重新搜索所有历史失败候选。先在独立暂存目录冻结 Alpaca 数据、完成所有回测，当前执行策略有效后才发布新成绩；旧源码、旧评估与研究批次完整归档。每个唯一候选的重评计入原批次剩余次数，模型调用成本为零。只有在新数据上超过当前策略原有改进门槛才更换执行策略。最终留出日期不进入重评，旧留出日期的市场信息不会因换源变得独立。
+
+重评结果写入 `state/research_revaluation.json`，看板“研究历史”提供展开明细；原本地模拟盘生命周期写入 `state/retired_paper_run.json`，状态为 ABORTED。Alpaca 账户、持仓和 `alpaca_execution.json` 不重置。
+
+## Paper 执行与风控观察
+
+当前按[架构文档第 11 节](docs/AGENT_HARNESS_ARCHITECTURE.md#11-本次上线范围执行与风控观察2026-10-27)先落地观察模式。固定版本、资金归属、账户活动/成交核对、高水位 15% 预警与 25% 退出、60 个未来完整交易日到期默认转现金均由持久状态控制；NVDA 排除。看板为只读。正式绩效接纳与自动更换版本仍关闭。
+
+`paper_observation_enabled` 需登记后显式启用；无法解释的现金、费用、持仓或公司行动会阻止新增交易，等待核对。风险覆盖从登记时开始，阈值不保证最大实际亏损。原始 Paper 净值不包含平台未派发的分红，不作为完整总收益证明。

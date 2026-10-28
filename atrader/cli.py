@@ -28,7 +28,7 @@ from atrader.ratchet import (
     run_signal_ratchet_update,
     run_live_trading_cycle,
 )
-from atrader.brokers import MultiBrokerRouter
+from atrader.brokers import MultiBrokerRouter, LocalPaperBroker
 from atrader.daemon import daemon_instance
 from atrader.web import run_web_server
 
@@ -43,6 +43,7 @@ def cmd_init() -> None:
         print("`.env` already exists.")
 
     save_config({})
+    MultiBrokerRouter(load_config()).broker.get_account_summary()
     hist = get_ratchet_history()
     sig = run_signal_ratchet_update()
     router = MultiBrokerRouter()
@@ -68,7 +69,7 @@ def cmd_daemon(trade_interval: int = 60, evolve_interval: int = 1800, budget: fl
     print(" - 退出方式     : 按 Ctrl+C 安全停止")
     print("=" * 76 + "\n")
 
-    daemon_instance.start(trade_interval=trade_interval, evolve_interval=evolve_interval)
+    daemon_instance.start(trade_interval=trade_interval, evolve_interval=evolve_interval, budget=budget)
 
     try:
         while True:
@@ -91,25 +92,23 @@ def cmd_daemon(trade_interval: int = 60, evolve_interval: int = 1800, budget: fl
 
 def cmd_backtest() -> None:
     res = evaluate_strategy()
-    print("\n=== Walk-Forward Strategy Evaluation (70% Train / 30% Out-of-Sample) ===")
+    print("\n=== Shared Portfolio Evaluation (2 rolling validation folds; holdout reserved) ===")
     print(f"Strategy Name         : {res['strategy_name']}")
     print(f"Karpathy Ratchet Score: {res['ratchet_score']} (Train: {res['train_score']} | Val: {res['validation_score']})")
-    print(f"Avg Annualized Sharpe : {res['avg_sharpe']}")
-    print(f"Avg Net Return        : +{res['avg_return_pct']}% (Net Profit: ${res['net_profit_usd']:,.2f})")
-    print(f"Avg Max Drawdown      : -{res['avg_max_drawdown_pct']}%")
+    print(f"Portfolio Annualized Sharpe : {res['avg_sharpe']}")
+    print(f"Portfolio Net Return        : +{res['avg_return_pct']}% (Net Profit: ${res['net_profit_usd']:,.2f})")
+    print(f"Portfolio Max Drawdown      : -{res['avg_max_drawdown_pct']}%")
     print(f"Trading Fees Deducted : ${res['total_trading_fees_usd']:,.2f}")
-    print("\nPer-Symbol Out-of-Sample Validation Breakdown:")
-    for sym, detail in res["symbols"].items():
-        v = detail["validation"]
-        print(
-            f"  - {sym:<10} | Val Sharpe: {v['sharpe']:>5.2f} | Val Return: {v['net_return_pct']:>+6.2f}% "
-            f"| Alpha: {v['alpha_pct']:>+6.2f}% | MaxDD: -{v['max_drawdown_pct']:>5.2f}% | Trades: {v['trade_count']}"
-        )
+    print("\nChronological portfolio validation folds:")
+    for index, fold in enumerate(res['validation_folds'], 1):
+        print(f"  Fold {index}: {fold['start_date']} -> {fold['end_date']} | Return: {fold['net_return_pct']:+.2f}% | Sharpe: {fold['sharpe']:.3f} | MaxDD: {fold['max_drawdown_pct']:.2f}%")
+    print(f"Reserved holdout sessions: {res['holdout']['reserved_sessions']} (not used for promotion)")
 
 
 def cmd_evolve(steps: int, mock: bool) -> None:
     print(f"\n=== Running Karpathy Code Ratchet ({steps} step(s)) ===")
     out = run_code_ratchet_step(steps=steps, force_mock=mock)
+    print("Research status:", out.get("research_status", "active"))
     for step in out["steps_executed"]:
         print(
             f"[Gen #{step['generation']}] {step['status']} | Score: {step['ratchet_score']} "
@@ -133,6 +132,12 @@ def cmd_signal() -> None:
 def cmd_trade(loop: bool, interval: int) -> None:
     while True:
         out = run_live_trading_cycle()
+        if out.get('status') != 'completed':
+            print('Portfolio check:', out.get('status'), '(no orders submitted)')
+            if not loop:
+                break
+            time.sleep(max(5, interval))
+            continue
         print(f"\n=== Live/Paper Execution Cycle (Strategy: {out['strategy_name']} | Runtime Tokens: 0) ===")
         for ex in out["executions"]:
             ord_status = ex["order_result"].get("status", "unknown")
@@ -163,7 +168,7 @@ def cmd_portfolio() -> None:
         print(
             f"  * [{acct['broker']:<11}] Status: {acct['status']}\n"
             f"    CustodyWhere : {acct['custody_location']}\n"
-            f"    Equity: ${acct['equity_usd']:,.2f} | Cash: ${acct['cash_usd']:,.2f} | Allocation Cap: ${acct['capital_cap_usd']:,.2f}"
+            f"    Equity: ${acct['equity_usd']:,.2f} | Cash: ${acct['cash_usd']:,.2f}"
         )
 
 
@@ -176,7 +181,10 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     sub.add_parser("init", help="Initialize configuration, baseline evaluation, and local paper ledger")
     sub.add_parser("status", help="Display current ratchet status and portfolio overview")
+    sub.add_parser("audit", help="Manually audit reserved holdout; never used for promotion")
     sub.add_parser("backtest", help="Run walk-forward backtest on strategy.py")
+    p_observe = sub.add_parser("paper-register-observation", help="Register frozen execution/risk observation; stop daemon first")
+    p_observe.add_argument("--sessions", type=int, default=60)
 
     p_daemon = sub.add_parser("daemon", help="Run autonomous 24/7 research & trading daemon")
     p_daemon.add_argument("--trade-interval", type=int, default=60, help="Seconds between trading cycles")
@@ -208,8 +216,22 @@ def main(argv: Optional[List[str]] = None) -> None:
         e_int = getattr(args, "evolve_interval", 1800)
         b = getattr(args, "budget", 0.50)
         cmd_daemon(trade_interval=t_int, evolve_interval=e_int, budget=b)
+    elif args.command == 'paper-register-observation':
+        import fcntl
+        from atrader.config import STATE_DIR
+        from atrader.alpaca import PaperClient
+        from atrader.observation import register
+        ensure_state_dir()
+        with (STATE_DIR/'observation.lock').open('a') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            contract=register(PROJECT_ROOT,STATE_DIR,load_config(),PaperClient(load_config()),args.sessions)
+        print(json.dumps({k:contract[k] for k in ('mode','task_id','registered_at','expires_at','strategy_sha256')},indent=2))
     elif args.command == "init":
         cmd_init()
+    elif args.command == "audit":
+        from atrader.research import audit_campaign
+        from atrader.config import STATE_DIR
+        print(json.dumps(audit_campaign(STATE_DIR, load_config(), PROJECT_ROOT / 'strategy.py'), indent=2, ensure_ascii=False))
     elif args.command == "backtest":
         cmd_backtest()
     elif args.command == "evolve":

@@ -1,5 +1,2 @@
-# Core runtime works out-of-the-box with Python 3.9+ standard library!
-# Install optional broker SDKs below when connecting live accounts:
-alpaca-py>=0.21.0
-ccxt>=4.3.0
-longbridge>=3.0.0
+# Core, paper execution and the bounded strategy harness use Python 3.9+ standard library.
+# No third-party runtime packages required.

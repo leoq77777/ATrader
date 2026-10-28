@@ -1,0 +1,21 @@
+[Unit]
+Description=ATrader paper trading and dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/atrader
+ExecStart=/usr/bin/python3 /opt/atrader/run_server.py
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/atrader
+
+[Install]
+WantedBy=multi-user.target
