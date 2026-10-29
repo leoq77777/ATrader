@@ -197,3 +197,72 @@ class ExternalCleanupTest(unittest.TestCase):
         adjusted=scoped_account(raw,{'external_cash_reserve_usd':1500})
         self.assertEqual(adjusted['cash'],0);self.assertEqual(adjusted['equity'],10000)
         self.assertEqual(raw['cash'],'1500')
+
+
+class CleanupFeeRegressionTest(unittest.TestCase):
+    setUp = ObservationTest.setUp
+    tick = ObservationTest.tick
+
+    def add_fee(self, **changes):
+        event={'id':'cat-fee','activity_type':'FEE','activity_sub_type':'CAT','status':'executed',
+               'currency':'USD','date':'2026-10-27','net_amount':'-0.01'}
+        event.update(changes);self.paper.events.append(event)
+        self.paper.cash+=float(event['net_amount'])
+
+    def test_confirmed_cat_fee_reconciles_once_across_restarts(self):
+        self.add_fee()
+        for _ in range(2):
+            result=self.tick()
+            self.assertEqual(result['state']['reconciliation'],'matched')
+            self.assertAlmostEqual(result['state']['equity'],9999.99)
+            self.assertEqual(result['state']['broker_account_fees_usd'],.01)
+        self.assertEqual(result['state']['high_water'],10000)
+
+    def test_actual_cat_fee_no_longer_blocks_external_cleanup(self):
+        obs.authorize_nvda_cleanup(self.state,self.paper);self.add_fee()
+        self.tick();self.tick();result=self.tick()
+        self.assertEqual(self.paper.qty['NVDA'],0)
+        self.assertEqual(len(self.paper.posts),1)
+        self.assertEqual(result['state']['reconciliation'],'matched')
+        self.assertEqual(result['state']['external_cash_reserve_usd'],500)
+        self.assertAlmostEqual(result['state']['equity'],9999.99)
+
+    def test_closed_market_fee_is_booked_but_no_order_is_submitted(self):
+        obs.authorize_nvda_cleanup(self.state,self.paper);self.add_fee();self.paper.open=False
+        result=self.tick()
+        self.assertEqual(result['status'],'external_cleanup_pending')
+        self.assertEqual(result['state']['reconciliation'],'matched')
+        self.assertEqual(self.paper.posts,[])
+
+    def test_unknown_cash_activity_blocks_new_risk_but_not_authorized_reduction(self):
+        obs.authorize_nvda_cleanup(self.state,self.paper)
+        self.paper.events.append({'id':'unknown-deposit','activity_type':'CSD','net_amount':'100'})
+        self.paper.cash+=100
+        self.assertFalse(self.tick()['allow_trade']);self.assertFalse(self.tick()['allow_trade'])
+        self.assertEqual(self.paper.qty['NVDA'],0)
+        self.assertEqual([(p['symbol'],p['side']) for p in self.paper.posts],[('NVDA','sell')])
+        self.assertEqual(self.paper.qty['XLK'],100)
+        self.assertEqual(self.tick()['status'],'observation_blocked')
+
+    def test_unconfirmed_foreign_or_positive_fees_still_block_new_risk(self):
+        for changes in ({'activity_sub_type':'UNKNOWN'},{'currency':'EUR'},{'status':'pending'},{'net_amount':'1'}):
+            with self.subTest(changes=changes):
+                self.paper.events=[];self.paper.cash=0;self.add_fee(**changes)
+                self.assertEqual(self.tick()['status'],'observation_blocked')
+                self.assertEqual(self.paper.posts,[])
+
+    def test_wrong_account_cannot_run_external_cleanup(self):
+        obs.authorize_nvda_cleanup(self.state,self.paper)
+        original=self.paper.request
+        def changed(path,*args,**kwargs):
+            result=original(path,*args,**kwargs)
+            return dict(result,id='other-account') if path=='/v2/account' else result
+        with patch.object(self.paper,'request',side_effect=changed):
+            self.assertEqual(self.tick()['status'],'observation_blocked')
+        self.assertEqual(obs.load_cleanup(self.state,self.contract)['orders'],[])
+        self.assertEqual(self.paper.posts,[])
+
+    def test_external_cleanup_cannot_expand_authorized_quantity(self):
+        obs.authorize_nvda_cleanup(self.state,self.paper);self.paper.qty['NVDA']+=1
+        self.assertEqual(self.tick()['status'],'observation_blocked')
+        self.assertEqual(self.paper.posts,[])

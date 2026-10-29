@@ -195,9 +195,17 @@ def reconcile(contract, client, order_cache=None, cleanup=None):
         raise ValueError('Paper account is blocked')
     expected={s:p['qty'] for s,p in contract['initial_positions'].items()};cash=contract['initial_cash']
     order_cache = order_cache if order_cache is not None else {}
-    reserve,sold=0.,0.
+    reserve,sold,account_fees=0.,0.,0.
     cleanup_ids={o['client_order_id'] for o in cleanup['orders']} if cleanup else set()
     for event in first:
+        if event.get('activity_type')=='FEE':
+            amount=number(event.get('net_amount'))
+            if (event.get('activity_sub_type')!='CAT' or event.get('status')!='executed'
+                or event.get('currency')!='USD' or amount>0):
+                raise ValueError('Unrecognized account fee; manual review required')
+            # Broker-confirmed account expense; not a modeled fill or an external cash inflow.
+            cash+=amount;account_fees-=amount
+            continue
         if cleanup and event.get('activity_type')=='FILL' and event.get('symbol')=='NVDA' and event.get('side')=='sell':
             order=client.request('/v2/orders/'+quote(event['order_id'],safe=''))
             if order.get('client_order_id') not in cleanup_ids or order.get('side')!='sell' or order.get('symbol')!='NVDA':
@@ -226,7 +234,7 @@ def reconcile(contract, client, order_cache=None, cleanup=None):
         target=expected.get(symbol,0) if symbol in contract['symbols'] else contract['external_positions'].get(symbol,{}).get('qty',0)
         if cleanup and symbol=='NVDA':target-=sold
         if abs(actual-target)>1e-7:raise ValueError('Broker position does not reconcile: '+symbol)
-    account=dict(account,external_cash_reserve_usd=reserve)
+    account=dict(account,external_cash_reserve_usd=reserve,broker_account_fees_usd=account_fees)
     equity=number(account['cash'])-reserve+sum(p['market_value'] for s,p in positions.items() if s in contract['symbols'])
     return account,positions,equity,len(first)
 
@@ -299,11 +307,23 @@ def tick(root,state_dir,cfg,client,clock):
         if hashlib.sha256((root/'strategy.py').read_bytes()).hexdigest()!=contract['strategy_sha256']:
             raise ValueError('Frozen execution source changed')
         cleanup=load_cleanup(state_dir,contract)
+        if cleanup and cleanup['status']!='completed':
+            # Explicit, bounded external liquidation must not depend on strategy PnL accounting.
+            cleanup_account=client.request('/v2/account')
+            if (hashlib.sha256(cleanup_account['id'].encode()).hexdigest()[:12]!=contract['account']
+                or cleanup_account.get('currency')!='USD' or cleanup_account.get('status')!='ACTIVE'
+                or cleanup_account.get('trading_blocked') or cleanup_account.get('account_blocked')):
+                raise ValueError('External cleanup account is not eligible')
+            cleanup_positions=positions_view(client.request('/v2/positions'))
+            if cleanup_positions.get('NVDA',{}).get('qty',0)>cleanup['authorized_qty']+1e-8:
+                raise ValueError('External NVDA position exceeds cleanup authorization')
+            cleanup_tick(contract,state_dir,client,clock,cleanup,cleanup_positions)
         account,positions,equity,count=reconcile(contract,client,state.setdefault('owned_order_ids',{}),cleanup)
         state['external_cash_reserve_usd']=account['external_cash_reserve_usd']
+        state['broker_account_fees_usd']=account['broker_account_fees_usd']
         if cleanup:
             cleanup['proceeds_usd']=account['external_cash_reserve_usd']
-            cleanup_tick(contract,state_dir,client,clock,cleanup,positions)
+            write_json_atomic(state_dir/'observation/nvda_cleanup.json',cleanup)
         state.update(equity=equity,reconciled_activities=count,reconciliation='matched',error=None)
         state['high_water']=max(state['high_water'],equity)
         state['drawdown']=max(0,1-equity/state['high_water'])
